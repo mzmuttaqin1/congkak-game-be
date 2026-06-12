@@ -9,9 +9,12 @@ import type {
   PublicPlayer,
   RoomSettings,
   RoomSettingsInput
-} from "@congkak-game/shared";
-import { COLORS, mergeRoomSettings } from "@congkak-game/shared";
+} from "@congcard/shared";
+import { COLORS, mergeRoomSettings } from "@congcard/shared";
 import { standardMode, shuffleCards } from "./modes/standard.js";
+
+const ONE_CALL_DELAY_MS = 700;
+const ONE_CALL_WINDOW_MS = 3000;
 
 export interface PlayerState extends PublicPlayer {
   hand: Card[];
@@ -30,7 +33,7 @@ export interface GameStateInternal {
   currentSeat: number;
   turnDeadline?: number;
   pendingChallenge?: PendingChallenge;
-  oneWindow?: { playerId: string; deadline: number };
+  oneWindow?: { playerId: string; opensAt: number; deadline: number };
   roundNumber: number;
   seq: number;
   actionLog: GameLogEntry[];
@@ -323,23 +326,36 @@ export function playDrawn(state: GameStateInternal, playerId: string, play: bool
 
 export function callOne(state: GameStateInternal, playerId: string): void {
   const player = findPlayer(state, playerId);
-  if (player.hand.length !== 1) {
-    throw new GameError("cannot_call_one", "You can only call One when you have one card.");
+  const now = Date.now();
+
+  if (
+    player.hand.length !== 1 ||
+    !state.oneWindow ||
+    state.oneWindow.playerId !== playerId ||
+    now < state.oneWindow.opensAt ||
+    now > state.oneWindow.deadline
+  ) {
+    throw new GameError("cannot_call_one", "You can only call One while your One window is open.");
   }
 
   player.calledOne = true;
-  if (state.oneWindow?.playerId === playerId) {
-    delete state.oneWindow;
-  }
-
+  delete state.oneWindow;
   pushLog(state, "one", `${player.nickname} called One.`);
 }
 
 export function catchOne(state: GameStateInternal, catcherId: string, targetId: string): void {
   const catcher = findPlayer(state, catcherId);
   const target = findPlayer(state, targetId);
+  const now = Date.now();
 
-  if (target.calledOne || target.hand.length !== 1 || state.oneWindow?.playerId !== targetId) {
+  if (
+    target.calledOne ||
+    target.hand.length !== 1 ||
+    !state.oneWindow ||
+    state.oneWindow.playerId !== targetId ||
+    now < state.oneWindow.opensAt ||
+    now > state.oneWindow.deadline
+  ) {
     throw new GameError("catch_failed", "That player cannot be caught now.");
   }
 
@@ -533,10 +549,12 @@ function applyPlayedCard(state: GameStateInternal, player: PlayerState, card: Ca
 
 function updateOneWindowAfterPlay(state: GameStateInternal, player: PlayerState): void {
   if (player.hand.length === 1) {
+    const opensAt = Date.now() + ONE_CALL_DELAY_MS;
     player.calledOne = false;
     state.oneWindow = {
       playerId: player.id,
-      deadline: Date.now() + 3000
+      opensAt,
+      deadline: opensAt + ONE_CALL_WINDOW_MS
     };
   } else {
     player.calledOne = false;

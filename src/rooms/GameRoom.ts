@@ -8,7 +8,7 @@ import {
   playCardSchema,
   playDrawnSchema,
   roomSettingsSchema
-} from "@congkak-game/shared";
+} from "@congcard/shared";
 import { config } from "../config.js";
 import {
   addPlayer,

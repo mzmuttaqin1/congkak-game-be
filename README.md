@@ -1,6 +1,6 @@
-# Congkak Game Backend
+# CongCard Backend
 
-Authoritative Colyseus backend for Congkak Game.
+Authoritative Colyseus backend for CongCard.
 
 ## Local Development
 

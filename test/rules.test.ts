@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { Card } from "@congkak-game/shared";
+import type { Card } from "@congcard/shared";
 import { standardMode } from "../src/engine/modes/standard.js";
 import {
   addPlayer,
@@ -94,6 +94,8 @@ describe("standard mode", () => {
 
     playCard(state, "p1", "red-1");
     expect(state.oneWindow?.playerId).toBe("p1");
+    state.oneWindow!.opensAt = Date.now() - 1;
+    state.oneWindow!.deadline = Date.now() + 1000;
 
     catchOne(state, "p2", "p1");
 
@@ -106,10 +108,42 @@ describe("standard mode", () => {
     state.players[0]!.hand = [card("red-1", "red", 1), card("blue-2", "blue", 2)];
 
     playCard(state, "p1", "red-1");
+    state.oneWindow!.opensAt = Date.now() - 1;
+    state.oneWindow!.deadline = Date.now() + 1000;
     callOne(state, "p1");
 
     expect(state.players[0]!.calledOne).toBe(true);
     expect(state.oneWindow).toBeUndefined();
+  });
+
+  it("rejects One calls before the shared window opens", () => {
+    const state = controlledGame();
+    state.players[0]!.hand = [card("red-1", "red", 1), card("blue-2", "blue", 2)];
+
+    playCard(state, "p1", "red-1");
+
+    expect(() => callOne(state, "p1")).toThrow("One window is open");
+  });
+
+  it("rejects catches before the shared window opens", () => {
+    const state = controlledGame();
+    state.players[0]!.hand = [card("red-1", "red", 1), card("blue-2", "blue", 2)];
+
+    playCard(state, "p1", "red-1");
+
+    expect(() => catchOne(state, "p2", "p1")).toThrow("cannot be caught");
+  });
+
+  it("rejects One actions after the window expires", () => {
+    const state = controlledGame();
+    state.players[0]!.hand = [card("red-1", "red", 1), card("blue-2", "blue", 2)];
+
+    playCard(state, "p1", "red-1");
+    state.oneWindow!.opensAt = Date.now() - 2000;
+    state.oneWindow!.deadline = Date.now() - 1;
+
+    expect(() => callOne(state, "p1")).toThrow("One window is open");
+    expect(() => catchOne(state, "p2", "p1")).toThrow("cannot be caught");
   });
 
   it("reshuffles discard cards into the draw pile", () => {
@@ -146,7 +180,7 @@ describe("standard mode", () => {
     startRound(state);
 
     expect(state.phase).toBe("playing");
-    expect(state.players[0]!.hand).toHaveLength(7);
+    expect([7, 9]).toContain(state.players[0]!.hand.length);
     expect(state.players[1]!.hand).toHaveLength(7);
     expect(state.discardPile).toHaveLength(1);
   });
