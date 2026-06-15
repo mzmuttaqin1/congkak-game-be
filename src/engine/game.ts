@@ -470,6 +470,11 @@ export function drawCard(state: GameStateInternal, playerId: string): void {
   ensureNoActiveOneWindow(state);
 
   if (state.pendingStack) {
+    const stack = state.pendingStack;
+    if (canPlayerStack(player, stack)) {
+      throw new GameError("stack_required", "You must stack a matching draw card.");
+    }
+
     resolveStackDraw(state, player);
     return;
   }
@@ -590,6 +595,7 @@ export function resolvePendingOneCall(state: GameStateInternal): boolean {
   }
 
   finalizePendingOneCall(state);
+  settlePendingStackIfUnstackable(state);
   return true;
 }
 
@@ -603,6 +609,7 @@ export function expireOneWindow(state: GameStateInternal): boolean {
   }
 
   closeOneWindowForPlayer(state, state.oneWindow.playerId);
+  settlePendingStackIfUnstackable(state);
   return true;
 }
 
@@ -806,6 +813,11 @@ export function resolveAutomatedTurns(state: GameStateInternal): boolean {
 
     const player = currentPlayer(state);
     if (state.pendingStack) {
+      if (settlePendingStackIfUnstackable(state)) {
+        changed = true;
+        continue;
+      }
+
       if (player.connected || !player.autoPlay) {
         return changed;
       }
@@ -925,6 +937,7 @@ function startStack(state: GameStateInternal, player: PlayerState, kind: Pending
   state.currentSeat = target.seat;
   setTurnDeadline(state);
   pushLog(state, "draw", `${target.nickname} must stack or draw ${amount} cards.`);
+  settlePendingStackIfUnstackable(state);
 }
 
 function applyStackedCard(state: GameStateInternal, player: PlayerState, card: Card): void {
@@ -950,6 +963,7 @@ function applyStackedCard(state: GameStateInternal, player: PlayerState, card: C
   state.currentSeat = target.seat;
   setTurnDeadline(state);
   pushLog(state, "draw", `${target.nickname} must stack or draw ${stack.totalDraw + amount} cards.`);
+  settlePendingStackIfUnstackable(state);
 }
 
 function resolveStackDraw(state: GameStateInternal, player: PlayerState): void {
@@ -977,6 +991,25 @@ function resolveStackDraw(state: GameStateInternal, player: PlayerState): void {
 
 function canStackCard(card: Card, stack: PendingStack): boolean {
   return stack.kind === "draw2" ? card.value === "draw2" : card.value === "wild4";
+}
+
+function canPlayerStack(player: PlayerState, stack: PendingStack): boolean {
+  return !player.finishedRank && player.hand.some((card) => canStackCard(card, stack));
+}
+
+function settlePendingStackIfUnstackable(state: GameStateInternal): boolean {
+  const stack = state.pendingStack;
+  if (!stack || state.pendingOneCall || hasActiveOneWindow(state)) {
+    return false;
+  }
+
+  const target = findPlayer(state, stack.targetPlayerId);
+  if (canPlayerStack(target, stack)) {
+    return false;
+  }
+
+  resolveStackDraw(state, target);
+  return true;
 }
 
 function stackDrawAmount(card: Card): number | null {

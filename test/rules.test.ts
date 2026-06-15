@@ -536,10 +536,6 @@ describe("standard mode", () => {
     playCard(state, "p2", "p2-blue-draw2");
 
     expect(state.players[1]!.finishedRank).toBe(2);
-    expect(state.pendingStack).toMatchObject({ targetPlayerId: "p3", totalDraw: 4 });
-
-    drawCard(state, "p3");
-
     expect(state.phase).toBe("roundEnd");
     expect(state.players[2]!.hand).toHaveLength(5);
     expect(state.lastStandPlacements).toMatchObject([
@@ -681,11 +677,37 @@ describe("standard mode", () => {
     state.pendingOneCall!.resolvesAt = Date.now() - 1;
     expect(resolvePendingOneCall(state)).toBe(true);
 
-    drawCard(state, "p3");
-
     expect(state.pendingStack).toBeUndefined();
     expect(state.players[2]!.hand).toHaveLength(5);
     expect(snapshotFor(state).currentPlayerId).toBe("p1");
+  });
+
+  it("auto-applies a stack when the target has no matching draw card", () => {
+    const state = controlledGame3();
+    state.settings.stackingEnabled = true;
+    state.players[0]!.hand = [card("p1-red-draw2", "red", "draw2"), card("p1-blue-1", "blue", 1), card("p1-green-2", "green", 2)];
+    state.players[1]!.hand = [card("p2-yellow-7", "yellow", 7)];
+    state.players[2]!.hand = [card("p3-green-8", "green", 8)];
+
+    playCard(state, "p1", "p1-red-draw2");
+
+    expect(state.pendingStack).toBeUndefined();
+    expect(state.players[1]!.hand).toHaveLength(3);
+    expect(snapshotFor(state).currentPlayerId).toBe("p3");
+  });
+
+  it("prevents drawing out of a stack when the target can stack", () => {
+    const state = controlledGame3();
+    state.settings.stackingEnabled = true;
+    state.players[0]!.hand = [card("p1-red-draw2", "red", "draw2"), card("p1-blue-1", "blue", 1), card("p1-green-2", "green", 2)];
+    state.players[1]!.hand = [card("p2-blue-draw2", "blue", "draw2"), card("p2-yellow-7", "yellow", 7)];
+    state.players[2]!.hand = [card("p3-green-8", "green", 8)];
+
+    playCard(state, "p1", "p1-red-draw2");
+
+    expect(state.pendingStack).toMatchObject({ targetPlayerId: "p2", totalDraw: 2 });
+    expect(() => drawCard(state, "p2")).toThrow("matching draw card");
+    expect(state.players[1]!.hand).toHaveLength(2);
   });
 
   it("plays a deterministic action-card sequence without stale One/Catch state", () => {
