@@ -155,6 +155,7 @@ export class GameRoom extends Room {
       const player = this.game.players.find((p) => p.id === client.sessionId);
       if (player) {
         player.ping = ping;
+        this.broadcastState();
       }
     });
   }
