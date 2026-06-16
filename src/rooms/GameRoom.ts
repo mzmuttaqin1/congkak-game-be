@@ -7,7 +7,7 @@ import {
   kickSchema,
   playCardSchema,
   playDrawnSchema,
-  roomSettingsSchema,
+  roomSettingsUpdateSchema,
   setAwaySchema
 } from "@congcard/shared";
 import { config } from "../config.js";
@@ -57,7 +57,7 @@ export class GameRoom extends Room {
   private readonly clientRateBuckets = new Map<string, ClientRateBucket>();
 
   onCreate(options: GameRoomOptions): void {
-    const settings = roomSettingsSchema.partial().parse(options.settings ?? {});
+    const settings = roomSettingsUpdateSchema.parse(options.settings ?? {});
     this.game = createGame(options.code, settings);
     this.maxClients = Math.max(40, this.game.settings.maxPlayers + 20);
     this.setPrivate(true);
@@ -82,7 +82,7 @@ export class GameRoom extends Room {
     }));
 
     this.onMessage("room.updateSettings", (client, message) => this.safe(client, () => {
-      const settingsUpdate = roomSettingsSchema.partial().parse(message ?? {});
+      const settingsUpdate = roomSettingsUpdateSchema.parse(message ?? {});
       updateSettings(this.game, client.sessionId, settingsUpdate);
       this.maxClients = Math.max(40, this.game.settings.maxPlayers + 20);
       this.broadcastState();

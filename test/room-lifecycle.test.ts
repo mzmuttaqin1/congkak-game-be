@@ -31,6 +31,19 @@ describe("room lifecycle", () => {
     expect(state.players.find((player) => player.id === "guest")?.isHost).toBe(true);
   });
 
+  it("preserves independent room toggles across incremental updates", () => {
+    const state = createGame("ROOM44");
+    addPlayer(state, "host", "Host", "sun");
+    addPlayer(state, "guest", "Guest", "moon");
+
+    updateSettings(state, "host", { jumpInEnabled: true });
+    updateSettings(state, "host", { stackingEnabled: true });
+
+    expect(state.settings.jumpInEnabled).toBe(true);
+    expect(state.settings.stackingEnabled).toBe(true);
+    expect(state.settings.challengeEnabled).toBe(true);
+  });
+
   it("rejects invalid room codes and avatar ids at the protocol boundary", () => {
     expect(roomCodeSchema.parse("abc234")).toBe("ABC234");
     expect(() => roomCodeSchema.parse("ABC12!")).toThrow();
