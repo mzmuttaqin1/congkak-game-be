@@ -1,4 +1,5 @@
 import { randomInt } from "node:crypto";
+import { createRequire } from "node:module";
 import cors from "cors";
 import express from "express";
 import pino from "pino";
@@ -10,6 +11,8 @@ import { GameRoom } from "./rooms/GameRoom.js";
 import { activeRoomCount, hasRoomCode, registerRoomCode, resolveRoomCode } from "./rooms/directory.js";
 
 const logger = pino({ level: config.logLevel });
+const require = createRequire(import.meta.url);
+const appVersion = (require("../package.json") as { version: string }).version;
 const RATE_LIMIT_WINDOW_MS = 60_000;
 const CREATE_ROOM_LIMIT = 20;
 const RESOLVE_ROOM_LIMIT = 180;
@@ -123,6 +126,8 @@ function configureHttp(app: express.Application): void {
   app.get("/healthz", (_request, response) => {
     response.json({
       ok: true,
+      version: appVersion,
+      uptimeSec: Math.floor(process.uptime()),
       rooms: activeRoomCount()
     });
   });

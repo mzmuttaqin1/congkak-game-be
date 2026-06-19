@@ -1,29 +1,45 @@
 import "dotenv/config";
+import { z } from "zod";
 
-function numberEnv(name: string, fallback: number): number {
-  const value = process.env[name];
-  if (!value) {
-    return fallback;
-  }
+const envSchema = z.object({
+  NODE_ENV: z.enum(["development", "test", "production"]).default("development"),
+  PORT: z.coerce.number().int().min(1).max(65_535).default(2567),
+  CORS_ORIGINS: z.string().min(1).default("http://localhost:3000"),
+  MAX_ROOMS: z.coerce.number().int().min(1).max(100_000).default(100),
+  TURN_TIMEOUT_DEFAULT: z.coerce.number().int().min(10).max(120).default(30),
+  RECONNECT_GRACE_SEC: z.coerce.number().int().min(0).max(600).default(60),
+  LOG_LEVEL: z.enum(["fatal", "error", "warn", "info", "debug", "trace", "silent"]).default("info")
+});
 
-  const parsed = Number(value);
-  return Number.isFinite(parsed) ? parsed : fallback;
+export interface AppConfig {
+  nodeEnv: "development" | "test" | "production";
+  port: number;
+  corsOrigins: string[];
+  maxRooms: number;
+  turnTimeoutDefault: number;
+  reconnectGraceSec: number;
+  logLevel: "fatal" | "error" | "warn" | "info" | "debug" | "trace" | "silent";
 }
 
-function originsEnv(): string[] {
-  const value = process.env.CORS_ORIGINS ?? "http://localhost:3000";
-  return value
-    .split(",")
+export function parseConfig(environment: NodeJS.ProcessEnv): AppConfig {
+  const parsed = envSchema.parse(environment);
+  const corsOrigins = parsed.CORS_ORIGINS.split(",")
     .map((origin) => origin.trim())
     .filter(Boolean);
+
+  if (corsOrigins.length === 0) {
+    throw new Error("CORS_ORIGINS must contain at least one origin.");
+  }
+
+  return {
+    nodeEnv: parsed.NODE_ENV,
+    port: parsed.PORT,
+    corsOrigins,
+    maxRooms: parsed.MAX_ROOMS,
+    turnTimeoutDefault: parsed.TURN_TIMEOUT_DEFAULT,
+    reconnectGraceSec: parsed.RECONNECT_GRACE_SEC,
+    logLevel: parsed.LOG_LEVEL
+  };
 }
 
-export const config = {
-  nodeEnv: process.env.NODE_ENV ?? "development",
-  port: numberEnv("PORT", 2567),
-  corsOrigins: originsEnv(),
-  maxRooms: numberEnv("MAX_ROOMS", 100),
-  turnTimeoutDefault: numberEnv("TURN_TIMEOUT_DEFAULT", 30),
-  reconnectGraceSec: numberEnv("RECONNECT_GRACE_SEC", 60),
-  logLevel: process.env.LOG_LEVEL ?? "info"
-};
+export const config = parseConfig(process.env);

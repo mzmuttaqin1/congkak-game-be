@@ -7,6 +7,7 @@ import {
   playCard,
   resolveAutomatedTurns,
   setPlayerAway,
+  setPlayerConnected,
   snapshotFor,
   type GameStateInternal
 } from "../src/engine/game.js";
@@ -17,12 +18,12 @@ function card(id: string, color: Card["color"], value: Card["value"]): Card {
 
 // Pre-seed the auto-play delay so it's already elapsed in unit tests.
 function resolveNow(state: GameStateInternal): boolean {
-  state.autoPlayPendingAt = Date.now() - 1001;
+  state.autoPlayPendingAt = Date.now() - 2000;
   return resolveAutomatedTurns(state);
 }
 
-function controlledGame3(): GameStateInternal {
-  const state = createGame("ABC123", { turnTimeoutSec: 30 });
+function controlledGame3(absentPlayerAction: "none" | "draw" | "autoplay" = "autoplay"): GameStateInternal {
+  const state = createGame("ABC123", { turnTimeoutSec: 30, absentPlayerAction });
   addPlayer(state, "p1", "Ava", "sun");
   addPlayer(state, "p2", "Ben", "moon");
   addPlayer(state, "p3", "Cy", "star");
@@ -69,7 +70,13 @@ describe("smart away autoplay", () => {
     state.drawPile = [card("filler", "blue", 2), card("drawn-red-7", "red", 7)];
     setPlayerAway(state, "p1", true);
 
-    resolveNow(state);
+    expect(resolveNow(state)).toBe(true);
+
+    expect(state.discardPile.at(-1)?.id).toBe("discard-red-5");
+    expect(state.players[0]!.drawnCardId).toBe("drawn-red-7");
+    expect(snapshotFor(state).currentPlayerId).toBe("p1");
+
+    expect(resolveNow(state)).toBe(true);
 
     expect(state.discardPile.at(-1)?.id).toBe("drawn-red-7");
     expect(state.players[0]!.hand.map((c) => c.id).sort()).toEqual(["p1-green-8", "p1-yellow-3"]);
@@ -82,7 +89,12 @@ describe("smart away autoplay", () => {
     state.drawPile = [card("filler", "blue", 1), card("drawn-blue-9", "blue", 9)];
     setPlayerAway(state, "p1", true);
 
-    resolveNow(state);
+    expect(resolveNow(state)).toBe(true);
+
+    expect(state.players[0]!.drawnCardId).toBe("drawn-blue-9");
+    expect(snapshotFor(state).currentPlayerId).toBe("p1");
+
+    expect(resolveNow(state)).toBe(true);
 
     expect(state.discardPile.at(-1)?.id).toBe("discard-red-5");
     expect(state.players[0]!.hand).toHaveLength(3);
@@ -111,6 +123,7 @@ describe("smart away autoplay", () => {
 
   it("auto-calls One at one card so an away player cannot be caught", () => {
     const state = controlledGame3();
+    state.settings.autoPlayCallOne = true;
     state.players[0]!.hand = [card("p1-red-9", "red", 9), card("p1-blue-2", "blue", 2)];
     setPlayerAway(state, "p1", true);
 
@@ -126,5 +139,60 @@ describe("smart away autoplay", () => {
     expect(state.players[0]!.calledOne).toBe(true);
     expect(state.oneWindow).toBeUndefined();
     expect(() => catchOne(state, "p2", "p1")).toThrow("cannot be caught");
+  });
+
+  it("leaves an away autoplay player catchable when automatic One is disabled", () => {
+    const state = controlledGame3();
+    state.players[0]!.hand = [card("p1-red-9", "red", 9), card("p1-blue-2", "blue", 2)];
+    setPlayerAway(state, "p1", true);
+
+    resolveNow(state);
+    expect(state.oneWindow?.playerId).toBe("p1");
+    state.oneWindow!.opensAt = Date.now() - 1;
+    resolveAutomatedTurns(state);
+
+    expect(state.players[0]!.calledOne).toBe(false);
+    expect(state.oneWindow?.playerId).toBe("p1");
+  });
+
+  it("draw mode always draws and passes even when a held card is playable", () => {
+    const state = controlledGame3("draw");
+    state.players[0]!.hand = [card("p1-red-9", "red", 9)];
+    state.drawPile = [card("filler", "blue", 1), card("drawn-red-7", "red", 7)];
+    setPlayerAway(state, "p1", true);
+
+    expect(resolveNow(state)).toBe(true);
+    expect(state.discardPile.at(-1)?.id).toBe("discard-red-5");
+    expect(state.players[0]!.drawnCardId).toBe("drawn-red-7");
+    expect(snapshotFor(state).currentPlayerId).toBe("p1");
+
+    expect(resolveNow(state)).toBe(true);
+    expect(state.discardPile.at(-1)?.id).toBe("discard-red-5");
+    expect(state.players[0]!.hand).toHaveLength(2);
+    expect(snapshotFor(state).currentPlayerId).toBe("p2");
+  });
+
+  it("applies draw mode to disconnected players", () => {
+    const state = controlledGame3("draw");
+    state.players[0]!.hand = [card("p1-red-9", "red", 9)];
+    state.drawPile = [card("filler", "blue", 1), card("drawn-blue-7", "blue", 7)];
+    setPlayerConnected(state, "p1", false);
+
+    expect(state.players[0]!.autoPlay).toBe(true);
+    expect(resolveNow(state)).toBe(true);
+    expect(state.players[0]!.drawnCardId).toBe("drawn-blue-7");
+    expect(resolveNow(state)).toBe(true);
+    expect(snapshotFor(state).currentPlayerId).toBe("p2");
+  });
+
+  it("does nothing proactively when absent behavior is disabled", () => {
+    const state = controlledGame3("none");
+    state.players[0]!.hand = [card("p1-red-9", "red", 9)];
+    setPlayerAway(state, "p1", true);
+
+    expect(state.players[0]!.autoPlay).toBe(false);
+    expect(resolveAutomatedTurns(state)).toBe(false);
+    expect(state.discardPile.at(-1)?.id).toBe("discard-red-5");
+    expect(snapshotFor(state).currentPlayerId).toBe("p1");
   });
 });

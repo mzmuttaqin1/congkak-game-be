@@ -43,9 +43,15 @@ describe("room lifecycle", () => {
     expect(state.settings.stackingEnabled).toBe(true);
     expect(state.settings.challengeEnabled).toBe(true);
     expect(state.settings.batchEnabled).toBe(false);
+    expect(state.settings.absentPlayerAction).toBe("draw");
+    expect(state.settings.autoPlayCallOne).toBe(false);
 
     updateSettings(state, "host", { batchEnabled: true });
     expect(state.settings.batchEnabled).toBe(true);
+
+    updateSettings(state, "host", { absentPlayerAction: "autoplay", autoPlayCallOne: true });
+    expect(state.settings.absentPlayerAction).toBe("autoplay");
+    expect(state.settings.autoPlayCallOne).toBe(true);
   });
 
   it("defaults One and Catch off for Last Stand and back on for normal scoring", () => {

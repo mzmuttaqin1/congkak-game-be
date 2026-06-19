@@ -28,7 +28,7 @@ const MIN_ONE_DELAY_MS = 200;
 const ONE_DELAY_EXTRA_MS = 150;
 const ONE_CALL_WINDOW_MS = 4000;
 const ONE_CALL_SETTLE_MS = 250;
-const AUTO_PLAY_AFTER_MISSED_TURNS = 2;
+const AUTO_ACTION_DELAY_MS = 1400;
 const RESUME_TOKEN_BYTES = 24;
 const BATCH_SYNC_MIN_LEAD_MS = 350;
 const BATCH_SYNC_MAX_LEAD_MS = 1500;
@@ -198,6 +198,8 @@ export function setPlayerConnected(state: GameStateInternal, id: string, connect
     player.connected = false;
     player.away = false;
     player.ready = false;
+    player.missedDisconnectedTurns = 0;
+    syncAbsentAutomation(state, player);
     pushLog(state, "room", `${player.nickname} disconnected.`);
     assignHost(state);
     syncPauseState(state);
@@ -219,7 +221,7 @@ export function setPlayerAway(state: GameStateInternal, id: string, away: boolea
   player.away = away;
   player.ready = away ? false : player.ready;
   player.missedDisconnectedTurns = 0;
-  player.autoPlay = away;
+  syncAbsentAutomation(state, player);
   pushLog(state, "room", away ? `${player.nickname} is away.` : `${player.nickname} returned to the table.`);
   assignHost(state);
   syncPauseState(state);
@@ -240,6 +242,7 @@ export function removePlayer(state: GameStateInternal, id: string): void {
     player.connected = false;
     player.away = false;
     player.ready = false;
+    syncAbsentAutomation(state, player);
     syncPauseState(state);
   }
 
@@ -279,6 +282,9 @@ export function updateSettings(state: GameStateInternal, id: string, input: Room
   }
 
   state.settings = nextSettings;
+  for (const item of state.players) {
+    syncAbsentAutomation(state, item);
+  }
   pushLog(state, "room", "Room settings were updated.");
 }
 
@@ -722,6 +728,9 @@ export function drawCard(state: GameStateInternal, playerId: string, automated =
 
   const activeColor = state.activeColor;
   if (!activeColor || !mode.isPlayable(card, { playerId, activeColor, discardTop: topDiscard(state), hand: player.hand, playerCount: activePlayers(state).length })) {
+    if (automated) {
+      return;
+    }
     delete player.drawnCardId;
     advanceTurn(state);
   }
@@ -1107,7 +1116,9 @@ export function resolveAutomatedTurns(state: GameStateInternal): boolean {
       const nowTs = Date.now();
       if (
         owner &&
-        isAutoControllable(owner) &&
+        state.settings.absentPlayerAction === "autoplay" &&
+        state.settings.autoPlayCallOne &&
+        isAutoControllable(state, owner) &&
         !owner.calledOne &&
         owner.hand.length === 1 &&
         nowTs >= ow.opensAt &&
@@ -1126,7 +1137,10 @@ export function resolveAutomatedTurns(state: GameStateInternal): boolean {
     const pending = state.pendingChallenge;
     if (pending) {
       const challenger = findPlayer(state, pending.challengerId);
-      if (isAutoControllable(challenger)) {
+      if (isAutoControllable(state, challenger)) {
+        if (!autoActionDelayElapsed(state)) {
+          return true;
+        }
         resolveChallenge(state, challenger.id, false, true);
         changed = true;
         continue;
@@ -1142,24 +1156,16 @@ export function resolveAutomatedTurns(state: GameStateInternal): boolean {
         continue;
       }
 
-      if (!isAutoControllable(player)) {
+      if (!isAutoControllable(state, player)) {
         return changed;
       }
 
-      // Apply 1-second "thinking" delay before acting on the auto player's turn.
-      const nowStack = Date.now();
-      if (state.autoPlayPendingAt === undefined) {
-        state.autoPlayPendingAt = nowStack;
+      if (!autoActionDelayElapsed(state)) {
         return true;
       }
-      if (nowStack - state.autoPlayPendingAt < 1000) {
-        return true;
-      }
-      delete state.autoPlayPendingAt;
 
-      // Stack a matching draw card when held; otherwise eat the pile.
-      const stackCardId = autoStackCardId(player, state.pendingStack);
-      if (stackCardId) {
+      const stackCardId = state.settings.absentPlayerAction === "autoplay" ? autoStackCardId(player, state.pendingStack) : undefined;
+      if (stackCardId && state.settings.absentPlayerAction === "autoplay") {
         const stackCard = player.hand.find((item) => item.id === stackCardId)!;
         const declaredColor = needsDeclaredColor(stackCard) ? chooseAutoColor(player, stackCardId) : undefined;
         playCard(state, player.id, stackCardId, declaredColor, true);
@@ -1170,23 +1176,20 @@ export function resolveAutomatedTurns(state: GameStateInternal): boolean {
       continue;
     }
 
-    if (!isAutoControllable(player)) {
+    if (!isAutoControllable(state, player)) {
       delete state.autoPlayPendingAt;
       return changed;
     }
 
-    // Apply 1-second "thinking" delay before acting on the auto player's turn.
-    const nowPlay = Date.now();
-    if (state.autoPlayPendingAt === undefined) {
-      state.autoPlayPendingAt = nowPlay;
+    if (!autoActionDelayElapsed(state)) {
       return true;
     }
-    if (nowPlay - state.autoPlayPendingAt < 1000) {
-      return true;
-    }
-    delete state.autoPlayPendingAt;
 
-    autoPlayTurn(state, player);
+    if (state.settings.absentPlayerAction === "draw") {
+      autoDrawTurn(state, player);
+    } else {
+      autoPlayTurn(state, player);
+    }
     changed = true;
   }
 
@@ -2025,14 +2028,43 @@ function markMissedDisconnectedTurn(state: GameStateInternal, player: PlayerStat
   }
 
   player.missedDisconnectedTurns += 1;
-  if (!player.autoPlay && player.missedDisconnectedTurns >= AUTO_PLAY_AFTER_MISSED_TURNS) {
-    player.autoPlay = true;
-    pushLog(state, "room", `${player.nickname} is on auto play until they reconnect.`);
-  }
 }
 
-function isAutoControllable(player: PlayerState): boolean {
-  return player.autoPlay && !player.finishedRank && (!player.connected || player.away);
+function syncAbsentAutomation(state: GameStateInternal, player: PlayerState): void {
+  player.autoPlay = (!player.connected || player.away) && state.settings.absentPlayerAction !== "none";
+}
+
+function isAutoControllable(state: GameStateInternal, player: PlayerState): boolean {
+  return state.settings.absentPlayerAction !== "none" && player.autoPlay && !player.finishedRank && (!player.connected || player.away);
+}
+
+function autoActionDelayElapsed(state: GameStateInternal): boolean {
+  const now = Date.now();
+  if (state.autoPlayPendingAt === undefined) {
+    state.autoPlayPendingAt = now;
+    return false;
+  }
+
+  if (now - state.autoPlayPendingAt < AUTO_ACTION_DELAY_MS) {
+    return false;
+  }
+
+  delete state.autoPlayPendingAt;
+  return true;
+}
+
+function autoDrawTurn(state: GameStateInternal, player: PlayerState): void {
+  if (!player.drawnCardId) {
+    drawCard(state, player.id, true);
+    if (player.drawnCardId) {
+      state.autoPlayPendingAt = Date.now();
+    }
+    return;
+  }
+
+  delete player.drawnCardId;
+  pushLog(state, "draw", `${player.nickname} auto-passed ${autoPlayReason(player)}.`);
+  advanceTurn(state);
 }
 
 function autoPlayTurn(state: GameStateInternal, player: PlayerState): void {
@@ -2049,12 +2081,12 @@ function autoPlayTurn(state: GameStateInternal, player: PlayerState): void {
       return;
     }
 
-    // Nothing playable: pull one card. drawCard auto-passes a dead card (and
-    // advances the turn); a live drawn card is left pending and played below.
+    // Nothing playable: pull one card and leave it pending so every client can
+    // show the draw before the follow-up play or pass.
     drawCard(state, player.id, true);
-  }
-
-  if (!player.drawnCardId) {
+    if (player.drawnCardId) {
+      state.autoPlayPendingAt = Date.now();
+    }
     return;
   }
 

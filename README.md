@@ -1,6 +1,12 @@
-# CongCard Backend
+# CongCard Backend v1.0.0
 
 Authoritative Colyseus backend for CongCard.
+
+## Runtime
+
+- Node.js 24.17.0 LTS
+- Colyseus 0.17.43
+- Express 5.2.1
 
 ## Local Development
 
@@ -40,3 +46,17 @@ npm run typecheck
 npm test
 npm run build
 ```
+
+`npm run build` creates the production bundle in `dist/`. Start the compiled service with:
+
+```bash
+npm start
+```
+
+The same checks run in GitHub Actions for every pull request and push to `main`.
+
+## Production
+
+Deploy this directory as the Railway service root. The service validates all environment values at startup and shuts down gracefully on `SIGINT` or `SIGTERM`. `/healthz` reports version, uptime, and active room count.
+
+Rooms are intentionally in-memory in v1.0.0 and are not retained across service restarts.

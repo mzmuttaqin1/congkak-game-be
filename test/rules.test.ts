@@ -418,45 +418,36 @@ describe("standard mode", () => {
     expect(snapshotFor(state).currentPlayerId).toBe("p1");
   });
 
-  it("enables immediate auto turns after two disconnected misses", () => {
+  it("enables configured draw automation immediately after disconnect", () => {
     const state = controlledGame3();
-    // Unplayable hand (active color is red, top is a red 5) so the auto turn
-    // falls back to drawing rather than playing a match.
     state.players[0]!.hand = [card("green-8", "green", 8)];
     state.players[1]!.hand = [card("blue-8", "blue", 8)];
     state.players[2]!.hand = [card("green-7", "green", 7)];
     setPlayerConnected(state, "p1", false);
 
-    state.currentSeat = 0;
-    state.turnDeadline = Date.now() - 1;
-    expect(handleTurnTimeout(state)).toBe(true);
-    expect(state.players[0]!.missedDisconnectedTurns).toBe(1);
-    expect(state.players[0]!.autoPlay).toBe(false);
-
-    state.currentSeat = 0;
-    state.turnDeadline = Date.now() - 1;
-    expect(handleTurnTimeout(state)).toBe(true);
-    expect(state.players[0]!.missedDisconnectedTurns).toBe(2);
     expect(state.players[0]!.autoPlay).toBe(true);
-
     const handSize = state.players[0]!.hand.length;
-    state.currentSeat = 0;
-    state.turnDeadline = Date.now() + 30_000;
-    state.autoPlayPendingAt = Date.now() - 1001;
+
+    state.autoPlayPendingAt = Date.now() - 2000;
     expect(resolveAutomatedTurns(state)).toBe(true);
     expect(state.players[0]!.hand).toHaveLength(handSize + 1);
+    expect(snapshotFor(state).currentPlayerId).toBe("p1");
+
+    state.autoPlayPendingAt = Date.now() - 2000;
+    expect(resolveAutomatedTurns(state)).toBe(true);
     expect(snapshotFor(state).currentPlayerId).toBe("p2");
   });
 
-  it("auto-accepts a disconnected challenge turn once auto play is enabled", () => {
+  it("auto-accepts a disconnected challenge turn in Autoplay mode", () => {
     const state = controlledGame3();
+    state.settings.absentPlayerAction = "autoplay";
     state.players[0]!.hand = [card("red-9", "red", 9)];
-    state.players[1]!.connected = false;
-    state.players[1]!.autoPlay = true;
     state.players[1]!.hand = [card("green-8", "green", 8)];
     state.players[2]!.hand = [card("blue-7", "blue", 7)];
+    setPlayerConnected(state, "p2", false);
     state.pendingChallenge = { offenderId: "p1", challengerId: "p2", declaredColor: "blue", guilty: false };
     state.currentSeat = 1;
+    state.autoPlayPendingAt = Date.now() - 2000;
 
     expect(resolveAutomatedTurns(state)).toBe(true);
 
@@ -465,7 +456,7 @@ describe("standard mode", () => {
     expect(snapshotFor(state).currentPlayerId).toBe("p3");
   });
 
-  it("auto plays immediately for away players while keeping them connected", () => {
+  it("auto draws after a delay for away players while keeping them connected", () => {
     const state = controlledGame3();
     // Unplayable hand so the away auto turn draws (covered by away-autoplay
     // tests for the play-a-match path).
@@ -475,9 +466,13 @@ describe("standard mode", () => {
     setPlayerAway(state, "p1", true);
 
     expect(state.players[0]!).toMatchObject({ connected: true, away: true, autoPlay: true });
-    state.autoPlayPendingAt = Date.now() - 1001;
+    state.autoPlayPendingAt = Date.now() - 2000;
     expect(resolveAutomatedTurns(state)).toBe(true);
     expect(state.players[0]!.hand).toHaveLength(2);
+    expect(snapshotFor(state).currentPlayerId).toBe("p1");
+
+    state.autoPlayPendingAt = Date.now() - 2000;
+    expect(resolveAutomatedTurns(state)).toBe(true);
     expect(snapshotFor(state).currentPlayerId).toBe("p2");
 
     setPlayerAway(state, "p1", false);
@@ -486,12 +481,14 @@ describe("standard mode", () => {
 
   it("auto-accepts an away challenge turn", () => {
     const state = controlledGame3();
+    state.settings.absentPlayerAction = "autoplay";
     state.players[0]!.hand = [card("red-9", "red", 9)];
     state.players[1]!.hand = [card("green-8", "green", 8)];
     state.players[2]!.hand = [card("blue-7", "blue", 7)];
     setPlayerAway(state, "p2", true);
     state.pendingChallenge = { offenderId: "p1", challengerId: "p2", declaredColor: "blue", guilty: false };
     state.currentSeat = 1;
+    state.autoPlayPendingAt = Date.now() - 2000;
 
     expect(resolveAutomatedTurns(state)).toBe(true);
 
