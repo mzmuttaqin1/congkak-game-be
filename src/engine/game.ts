@@ -7,6 +7,7 @@ import type {
   GamePhase,
   GameSnapshot,
   LastStandPlacement,
+  PendingBatchPlay,
   PauseReason,
   ParticipantRole,
   PendingChallenge,
@@ -29,6 +30,13 @@ const ONE_CALL_WINDOW_MS = 4000;
 const ONE_CALL_SETTLE_MS = 250;
 const AUTO_PLAY_AFTER_MISSED_TURNS = 2;
 const RESUME_TOKEN_BYTES = 24;
+const BATCH_SYNC_MIN_LEAD_MS = 350;
+const BATCH_SYNC_MAX_LEAD_MS = 1500;
+const BATCH_SYNC_EXTRA_MS = 200;
+const BATCH_MAX_START_SPAN_MS = 1800;
+const BATCH_MAX_CARD_INTERVAL_MS = 180;
+const BATCH_MIN_CARD_INTERVAL_MS = 40;
+const BATCH_FLIGHT_DURATION_MS = 800;
 
 export interface PlayerState extends PublicPlayer {
   hand: Card[];
@@ -37,6 +45,11 @@ export interface PlayerState extends PublicPlayer {
 }
 
 export type ViewerState = PublicViewer;
+
+interface PendingBatchPlayInternal extends PendingBatchPlay {
+  handBefore: Card[];
+  activeColorBefore: Color;
+}
 
 export interface GameStateInternal {
   code: string;
@@ -52,6 +65,7 @@ export interface GameStateInternal {
   turnDeadline?: number;
   pendingChallenge?: PendingChallenge;
   pendingStack?: PendingStack;
+  pendingBatchPlay?: PendingBatchPlayInternal;
   pauseReason?: PauseReason;
   oneWindow?: { playerId: string; opensAt: number; deadline: number };
   pendingOneCall?: { playerId: string; resolvesAt: number };
@@ -305,6 +319,10 @@ export function kickPlayer(state: GameStateInternal, hostId: string, targetId: s
       delete state.pendingStack;
     }
 
+    if (state.pendingBatchPlay?.playerId === targetId) {
+      delete state.pendingBatchPlay;
+    }
+
     // Resolve the next seat while the target still exists, then fold their
     // cards back into the draw pile so the deck never silently shrinks.
     const wasCurrent = state.currentSeat === target.seat;
@@ -376,6 +394,7 @@ export function startRound(state: GameStateInternal): void {
   state.discardPile = [];
   delete state.pendingChallenge;
   delete state.pendingStack;
+  delete state.pendingBatchPlay;
   delete state.pauseReason;
   delete state.oneWindow;
   delete state.pendingOneCall;
@@ -424,6 +443,7 @@ export function playCard(
 ): void {
   ensurePlaying(state);
   ensureNoPendingOneCall(state);
+  ensureNoPendingBatchPlay(state);
   ensureNotPaused(state);
   const mode = getMode(state.settings);
   const current = currentPlayer(state);
@@ -516,9 +536,153 @@ export function playCard(
   }
 }
 
+export function playBatch(
+  state: GameStateInternal,
+  playerId: string,
+  cardIds: string[],
+  declaredColor?: Color
+): void {
+  ensurePlaying(state);
+  ensureNoPendingOneCall(state);
+  ensureNoPendingBatchPlay(state);
+  ensureNotPaused(state);
+
+  if (!state.settings.batchEnabled) {
+    throw new GameError("batch_disabled", "Batch Cards are disabled for this room.");
+  }
+
+  const player = currentPlayer(state);
+  if (player.id !== playerId) {
+    throw new GameError("not_your_turn", "It is not your turn.");
+  }
+
+  ensurePlayerInteractive(player);
+  ensurePlayerInRound(player);
+  ensureNoActiveOneWindow(state);
+
+  if (player.drawnCardId) {
+    throw new GameError("batch_after_draw", "Batch Cards cannot be played after drawing.");
+  }
+
+  if (cardIds.length < 2 || new Set(cardIds).size !== cardIds.length) {
+    throw new GameError("invalid_batch", "Choose at least two different cards for a batch.");
+  }
+
+  const cards = cardIds.map((cardId) => player.hand.find((card) => card.id === cardId));
+  if (cards.some((card) => !card)) {
+    throw new GameError("card_not_found", "A selected batch card is not in your hand.");
+  }
+
+  const orderedCards = cards as Card[];
+  const value = orderedCards[0]!.value;
+  if (orderedCards.some((card) => card.value !== value)) {
+    throw new GameError("invalid_batch", "Every card in a batch must have the same value.");
+  }
+
+  const needsColor = value === "wild" || value === "wild4";
+  if (needsColor && !declaredColor) {
+    throw new GameError("color_required", "Choose a color for this Wild batch.");
+  }
+
+  if (!needsColor && declaredColor) {
+    throw new GameError("invalid_batch", "Only Wild batches may declare a color.");
+  }
+
+  const stack = state.pendingStack;
+  if (stack) {
+    if (stack.targetPlayerId !== player.id || orderedCards.some((card) => !canStackCard(card, stack))) {
+      throw new GameError("invalid_card", "Only matching draw cards can be batched onto this stack.");
+    }
+  } else {
+    if (state.pendingChallenge) {
+      throw new GameError("pending_challenge", "Resolve the Wild Draw Four challenge first.");
+    }
+
+    const activeColor = state.activeColor;
+    if (!activeColor) {
+      throw new GameError("missing_color", "The active color is missing.");
+    }
+
+    const mode = getMode(state.settings);
+    if (!mode.isPlayable(orderedCards[0]!, {
+      playerId,
+      activeColor,
+      discardTop: topDiscard(state),
+      hand: player.hand,
+      playerCount: activePlayers(state).length
+    })) {
+      throw new GameError("invalid_card", "The first card in that batch cannot be played now.");
+    }
+  }
+
+  const now = Date.now();
+  const highestPing = activePlayers(state).reduce((highest, item) => Math.max(highest, item.connected ? item.ping : 0), 0);
+  const leadMs = Math.max(BATCH_SYNC_MIN_LEAD_MS, Math.min(BATCH_SYNC_MAX_LEAD_MS, highestPing + BATCH_SYNC_EXTRA_MS));
+  const intervalMs = Math.min(
+    BATCH_MAX_CARD_INTERVAL_MS,
+    Math.max(BATCH_MIN_CARD_INTERVAL_MS, Math.floor(BATCH_MAX_START_SPAN_MS / Math.max(1, orderedCards.length - 1)))
+  );
+  const startsAt = now + leadMs;
+
+  state.seq += 1;
+  state.pendingBatchPlay = {
+    id: state.seq,
+    playerId,
+    cards: orderedCards,
+    ...(declaredColor ? { declaredColor } : {}),
+    startsAt,
+    cardIntervalMs: intervalMs,
+    resolvesAt: startsAt + intervalMs * (orderedCards.length - 1) + BATCH_FLIGHT_DURATION_MS,
+    handBefore: [...player.hand],
+    activeColorBefore: state.activeColor ?? "red"
+  };
+  delete state.turnDeadline;
+  delete state.autoPlayPendingAt;
+}
+
+export function resolvePendingBatchPlay(state: GameStateInternal): boolean {
+  const pending = state.pendingBatchPlay;
+  if (!pending || Date.now() < pending.resolvesAt) {
+    return false;
+  }
+
+  delete state.pendingBatchPlay;
+  const player = findPlayer(state, pending.playerId);
+  if (state.phase !== "playing" || player.finishedRank || currentPlayer(state).id !== player.id) {
+    return false;
+  }
+
+  const selectedIds = new Set(pending.cards.map((card) => card.id));
+  if (pending.cards.some((card) => !player.hand.some((held) => held.id === card.id))) {
+    setTurnDeadline(state);
+    return false;
+  }
+
+  player.hand = player.hand.filter((card) => !selectedIds.has(card.id));
+  player.cardCount = player.hand.length;
+  player.calledOne = false;
+  state.discardPile.push(...pending.cards);
+
+  const finalCard = pending.cards.at(-1)!;
+  const finalColor = pending.declaredColor ?? finalCard.color ?? state.activeColor;
+  if (finalColor) {
+    state.activeColor = finalColor;
+  }
+  updateOneWindowAfterPlay(state, player);
+  pushLog(state, "batch", `${player.nickname} played a batch of ${pending.cards.length} ${batchValueLabel(finalCard)} cards.`);
+  applyBatchCards(state, player, pending.cards, pending.handBefore, pending.activeColorBefore);
+
+  if (!state.pendingChallenge && !state.pendingStack && player.hand.length === 0) {
+    finishPlayerOrCompleteRound(state, player.id);
+  }
+
+  return true;
+}
+
 export function drawCard(state: GameStateInternal, playerId: string, automated = false): void {
   ensurePlaying(state);
   ensureNoPendingOneCall(state);
+  ensureNoPendingBatchPlay(state);
   ensureNotPaused(state);
   ensureNoPendingChallenge(state);
   const mode = getMode(state.settings);
@@ -566,6 +730,7 @@ export function drawCard(state: GameStateInternal, playerId: string, automated =
 export function playDrawn(state: GameStateInternal, playerId: string, play: boolean, declaredColor?: Color): void {
   ensurePlaying(state);
   ensureNoPendingOneCall(state);
+  ensureNoPendingBatchPlay(state);
   ensureNotPaused(state);
   ensureNoPendingChallenge(state);
   const player = currentPlayer(state);
@@ -594,6 +759,7 @@ export function playDrawn(state: GameStateInternal, playerId: string, play: bool
 
 export function callOne(state: GameStateInternal, playerId: string, automated = false): void {
   ensurePlaying(state);
+  ensureNoPendingBatchPlay(state);
   ensureNotPaused(state);
   const player = findPlayer(state, playerId);
   if (!automated) {
@@ -638,6 +804,7 @@ export function callOne(state: GameStateInternal, playerId: string, automated = 
 
 export function catchOne(state: GameStateInternal, catcherId: string, targetId: string): void {
   ensurePlaying(state);
+  ensureNoPendingBatchPlay(state);
   ensureNotPaused(state);
   const catcher = findPlayer(state, catcherId);
   ensurePlayerInteractive(catcher);
@@ -699,6 +866,7 @@ export function expireOneWindow(state: GameStateInternal): boolean {
 export function resolveChallenge(state: GameStateInternal, playerId: string, accept: boolean, automated = false): void {
   ensurePlaying(state);
   ensureNoPendingOneCall(state);
+  ensureNoPendingBatchPlay(state);
   ensureNotPaused(state);
   const pending = state.pendingChallenge;
   if (!pending) {
@@ -728,18 +896,18 @@ export function resolveChallenge(state: GameStateInternal, playerId: string, acc
   }
 
   if (!accept) {
-    const totalDraw = challengeableStack?.totalDraw ?? 4;
+    const totalDraw = challengeableStack?.totalDraw ?? pending.drawCount ?? 4;
     drawMany(state, challenger, totalDraw);
     state.currentSeat = seatAfter(state, challenger.seat);
     pushLog(state, "challenge", totalDraw === 4 ? `${challenger.nickname} took four cards.` : `${challenger.nickname} took ${totalDraw} cards.`);
   } else if (pending.guilty) {
-    drawMany(state, offender, 4);
+    drawMany(state, offender, pending.drawCount ?? 4);
     state.currentSeat = challenger.seat;
     pushLog(state, "challenge", `${challenger.nickname} won the challenge.`);
   } else {
-    drawMany(state, challenger, 6);
+    drawMany(state, challenger, (pending.drawCount ?? 4) + 2);
     state.currentSeat = seatAfter(state, challenger.seat);
-    pushLog(state, "challenge", `${challenger.nickname} lost the challenge and drew six.`);
+    pushLog(state, "challenge", `${challenger.nickname} lost the challenge and drew ${(pending.drawCount ?? 4) + 2} cards.`);
   }
 
   setTurnDeadline(state);
@@ -753,6 +921,10 @@ export function handleTurnTimeout(state: GameStateInternal): boolean {
   const pause = syncPauseState(state);
   if (pause.paused) {
     return pause.changed;
+  }
+
+  if (state.pendingBatchPlay) {
+    return false;
   }
 
   if (state.phase !== "playing" || !state.turnDeadline || Date.now() < state.turnDeadline) {
@@ -861,6 +1033,19 @@ export function snapshotFor(state: GameStateInternal, playerId?: string): GameSn
     snapshot.pendingStack = state.pendingStack;
   }
 
+  if (state.pendingBatchPlay) {
+    const pending = state.pendingBatchPlay;
+    snapshot.pendingBatchPlay = {
+      id: pending.id,
+      playerId: pending.playerId,
+      cards: pending.cards,
+      ...(pending.declaredColor ? { declaredColor: pending.declaredColor } : {}),
+      startsAt: pending.startsAt,
+      cardIntervalMs: pending.cardIntervalMs,
+      resolvesAt: pending.resolvesAt
+    };
+  }
+
   if (state.pauseReason) {
     snapshot.pauseReason = state.pauseReason;
   }
@@ -902,6 +1087,9 @@ export function resolveAutomatedTurns(state: GameStateInternal): boolean {
   }
 
   let changed = false;
+  if (state.pendingBatchPlay) {
+    return changed;
+  }
   // Allow extra iterations beyond one-per-player so a chain of auto turns can
   // also fit the auto-One call and auto-stack steps without stalling a tick.
   const limit = state.players.length * 2 + 5;
@@ -1020,6 +1208,145 @@ function applyOpeningCard(state: GameStateInternal, card: Card): void {
   }
 }
 
+function applyBatchCards(
+  state: GameStateInternal,
+  player: PlayerState,
+  cards: Card[],
+  handBefore: Card[],
+  activeColorBefore: Color
+): void {
+  const value = cards[0]!.value;
+  const count = cards.length;
+  const existingStack = state.pendingStack;
+
+  if (value === "skip") {
+    let skippedSeat = player.seat;
+    for (let index = 0; index < count; index += 1) {
+      skippedSeat = nextOpponentSeat(state, skippedSeat, player.id);
+    }
+    state.currentSeat = seatAfter(state, skippedSeat);
+    setTurnDeadline(state);
+    pushLog(state, "skip", `${count} players were skipped by the batch.`);
+    return;
+  }
+
+  if (value === "reverse") {
+    if (count % 2 === 1) {
+      state.direction = state.direction === 1 ? -1 : 1;
+    }
+    state.currentSeat = activePlayers(state).length === 2 ? player.seat : seatAfter(state, player.seat);
+    setTurnDeadline(state);
+    pushLog(state, "reverse", `Turn direction changed ${count} times.`);
+    return;
+  }
+
+  if (value === "draw2") {
+    const totalDraw = count * 2;
+    if (existingStack) {
+      applyStackedBatch(state, player, totalDraw);
+      return;
+    }
+
+    if (state.settings.stackingEnabled) {
+      startStack(state, player, "draw2", totalDraw);
+      return;
+    }
+
+    const target = findPlayerBySeat(state, seatAfter(state, player.seat));
+    drawMany(state, target, totalDraw);
+    state.currentSeat = seatAfter(state, target.seat);
+    setTurnDeadline(state);
+    pushLog(state, "draw", `${target.nickname} drew ${totalDraw} cards.`);
+    return;
+  }
+
+  if (value === "wild4") {
+    const totalDraw = count * 4;
+    if (existingStack) {
+      applyStackedBatch(state, player, totalDraw);
+      return;
+    }
+
+    const guilty = handBefore.some((item) => !cards.some((batchCard) => batchCard.id === item.id) && item.color === activeColorBefore);
+    if (state.settings.stackingEnabled) {
+      startStack(
+        state,
+        player,
+        "wild4",
+        totalDraw,
+        state.settings.challengeEnabled
+          ? { declaredColor: state.activeColor ?? "red", guilty }
+          : undefined
+      );
+      return;
+    }
+
+    const target = findPlayerBySeat(state, seatAfter(state, player.seat));
+    if (!state.settings.challengeEnabled) {
+      drawMany(state, target, totalDraw);
+      state.currentSeat = seatAfter(state, target.seat);
+      setTurnDeadline(state);
+      pushLog(state, "challenge", `${target.nickname} took ${totalDraw} cards.`);
+      return;
+    }
+
+    state.pendingChallenge = {
+      offenderId: player.id,
+      challengerId: target.id,
+      declaredColor: state.activeColor ?? "red",
+      guilty,
+      drawCount: totalDraw
+    };
+    state.currentSeat = target.seat;
+    setTurnDeadline(state);
+    pushLog(state, "wild", `${target.nickname} must choose whether to challenge.`);
+    return;
+  }
+
+  if (value === "wild") {
+    pushLog(state, "wild", `Active color is ${state.activeColor}.`);
+  }
+
+  advanceTurn(state);
+}
+
+function applyStackedBatch(state: GameStateInternal, player: PlayerState, amount: number): void {
+  const stack = state.pendingStack;
+  if (!stack) {
+    throw new GameError("invalid_batch", "There is no draw stack for this batch.");
+  }
+
+  const stackedOut = player.hand.length === 0;
+  if (stackedOut && isLastStand(state)) {
+    finishLastStandPlayer(state, player.id);
+  }
+
+  const target = findPlayerBySeat(state, seatAfter(state, player.seat));
+  const roundWinnerId = stack.roundWinnerId ?? (!isLastStand(state) && stackedOut ? player.id : undefined);
+  if (stack.challengeable) {
+    delete state.pendingChallenge;
+  }
+  state.pendingStack = {
+    kind: stack.kind,
+    targetPlayerId: target.id,
+    totalDraw: stack.totalDraw + amount,
+    challengeable: false,
+    ...(roundWinnerId ? { roundWinnerId } : {})
+  };
+  state.currentSeat = target.seat;
+  setTurnDeadline(state);
+  pushLog(state, "draw", `${target.nickname} must stack or draw ${stack.totalDraw + amount} cards.`);
+  settlePendingStackIfUnstackable(state);
+}
+
+function nextOpponentSeat(state: GameStateInternal, fromSeat: number, actorId: string): number {
+  let seat = seatAfter(state, fromSeat);
+  while (findPlayerBySeat(state, seat).id === actorId) {
+    seat = seatAfter(state, seat);
+  }
+  return seat;
+}
+
 function applyPlayedCard(
   state: GameStateInternal,
   player: PlayerState,
@@ -1134,7 +1461,8 @@ function startStack(
       offenderId: player.id,
       challengerId: target.id,
       declaredColor: challenge.declaredColor,
-      guilty: challenge.guilty
+      guilty: challenge.guilty,
+      drawCount: amount
     };
   }
   state.currentSeat = target.seat;
@@ -1653,6 +1981,10 @@ function rebindPlayerSession(state: GameStateInternal, oldId: string, newId: str
     state.pendingStack.roundWinnerId = newId;
   }
 
+  if (state.pendingBatchPlay?.playerId === oldId) {
+    state.pendingBatchPlay.playerId = newId;
+  }
+
   if (state.roundWinnerId === oldId) {
     state.roundWinnerId = newId;
   }
@@ -1878,6 +2210,11 @@ function randomColor(): Color {
 }
 
 function setTurnDeadline(state: GameStateInternal): void {
+  if (state.pendingBatchPlay) {
+    delete state.turnDeadline;
+    return;
+  }
+
   const pause = syncPauseState(state);
   if (pause.paused) {
     return;
@@ -1979,9 +2316,19 @@ function ensureNoPendingOneCall(state: GameStateInternal): void {
   throw new GameError("one_call_pending", "A One call is still being resolved.");
 }
 
+function ensureNoPendingBatchPlay(state: GameStateInternal): void {
+  if (state.pendingBatchPlay) {
+    throw new GameError("batch_in_progress", "Wait for the current batch to finish.");
+  }
+}
+
 function cardLabel(card: Card): string {
   const color = card.color ? `${card.color} ` : "";
   return `${color}${card.value}`;
+}
+
+function batchValueLabel(card: Card): string {
+  return String(card.value);
 }
 
 function emoteText(emoteId: string): string {

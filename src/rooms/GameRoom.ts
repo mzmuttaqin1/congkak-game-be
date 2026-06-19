@@ -5,6 +5,7 @@ import {
   emoteSchema,
   joinOptionsSchema,
   kickSchema,
+  playBatchSchema,
   playCardSchema,
   playDrawnSchema,
   roomSettingsUpdateSchema,
@@ -21,11 +22,13 @@ import {
   GameError,
   handleTurnTimeout,
   kickPlayer,
+  playBatch,
   playCard,
   playDrawn,
   removePlayer,
   resolveChallenge,
   resolveAutomatedTurns,
+  resolvePendingBatchPlay,
   resolvePendingOneCall,
   sendEmote,
   setPlayerConnected,
@@ -66,12 +69,14 @@ export class GameRoom extends Room {
     this.setPrivate(true);
     this.clock.setInterval(() => {
       try {
+        const batchResolved = resolvePendingBatchPlay(this.game);
         const oneCallResolved = resolvePendingOneCall(this.game);
         const windowClosed = expireOneWindow(this.game);
         const autoPlayedBeforeTimeout = resolveAutomatedTurns(this.game);
         const timedOut = handleTurnTimeout(this.game);
         const autoPlayedAfterTimeout = resolveAutomatedTurns(this.game);
         if (
+          batchResolved ||
           oneCallResolved ||
           windowClosed ||
           autoPlayedBeforeTimeout ||
@@ -123,6 +128,12 @@ export class GameRoom extends Room {
     this.onMessage("game.playCard", (client, message) => this.safe(client, () => {
       const payload = playCardSchema.parse(message);
       playCard(this.game, client.sessionId, payload.cardId, payload.declaredColor);
+      this.broadcastState();
+    }));
+
+    this.onMessage("game.playBatch", (client, message) => this.safe(client, () => {
+      const payload = playBatchSchema.parse(message);
+      playBatch(this.game, client.sessionId, payload.cardIds, payload.declaredColor);
       this.broadcastState();
     }));
 

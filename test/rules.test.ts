@@ -9,9 +9,11 @@ import {
   drawCard,
   expireOneWindow,
   handleTurnTimeout,
+  playBatch,
   playCard,
   resolveAutomatedTurns,
   resolveChallenge,
+  resolvePendingBatchPlay,
   resolvePendingOneCall,
   setPlayerAway,
   setPlayerConnected,
@@ -884,6 +886,144 @@ describe("standard mode", () => {
     expect(state.pendingStack).toBeUndefined();
     expect(state.players[1]!.hand).toHaveLength(4);
     expect(snapshotFor(state).currentPlayerId).toBe("p3");
+  });
+
+  it("plays an ordered mixed-color number batch after the synchronized lock", () => {
+    const state = controlledGame3();
+    state.settings.batchEnabled = true;
+    state.players[0]!.hand = [
+      card("p1-red-5", "red", 5),
+      card("p1-blue-5", "blue", 5),
+      card("p1-green-9", "green", 9)
+    ];
+
+    playBatch(state, "p1", ["p1-red-5", "p1-blue-5"]);
+
+    expect(state.pendingBatchPlay).toMatchObject({ playerId: "p1", cards: [{ id: "p1-red-5" }, { id: "p1-blue-5" }] });
+    expect(state.turnDeadline).toBeUndefined();
+    expect(() => drawCard(state, "p1")).toThrow("current batch");
+    state.pendingBatchPlay!.resolvesAt = Date.now() - 1;
+    expect(resolvePendingBatchPlay(state)).toBe(true);
+
+    expect(state.discardPile.at(-1)?.id).toBe("p1-blue-5");
+    expect(state.activeColor).toBe("blue");
+    expect(state.players[0]!.hand.map((item) => item.id)).toEqual(["p1-green-9"]);
+    expect(snapshotFor(state).currentPlayerId).toBe("p2");
+    expect(state.oneWindow?.playerId).toBe("p1");
+  });
+
+  it("rejects invalid and post-draw batches without mutating the hand", () => {
+    const state = controlledGame3();
+    state.settings.batchEnabled = true;
+    state.players[0]!.hand = [card("p1-red-5", "red", 5), card("p1-blue-6", "blue", 6), card("p1-green-5", "green", 5)];
+    const before = state.players[0]!.hand.map((item) => item.id);
+
+    expect(() => playBatch(state, "p1", ["p1-red-5", "p1-blue-6"])).toThrow("same value");
+    expect(state.players[0]!.hand.map((item) => item.id)).toEqual(before);
+
+    state.players[0]!.drawnCardId = "p1-red-5";
+    expect(() => playBatch(state, "p1", ["p1-red-5", "p1-green-5"])).toThrow("after drawing");
+    expect(state.pendingBatchPlay).toBeUndefined();
+  });
+
+  it("applies wrapped batch skips without counting the actor", () => {
+    const state = createGame("ABC123", { turnTimeoutSec: 30, batchEnabled: true });
+    addPlayer(state, "p1", "Ava", "sun");
+    addPlayer(state, "p2", "Ben", "moon");
+    addPlayer(state, "p3", "Cy", "star");
+    addPlayer(state, "p4", "Dee", "bolt");
+    state.phase = "playing";
+    state.activeColor = "red";
+    state.discardPile = [card("discard-red-5", "red", 5)];
+    state.drawPile = drawPile();
+    state.currentSeat = 0;
+    state.direction = 1;
+    state.players[0]!.hand = [
+      card("skip-r", "red", "skip"),
+      card("skip-y", "yellow", "skip"),
+      card("skip-g", "green", "skip"),
+      card("skip-b", "blue", "skip"),
+      card("keep", "red", 1)
+    ];
+    state.players[1]!.hand = [card("p2-card", "blue", 1)];
+    state.players[2]!.hand = [card("p3-card", "green", 2)];
+    state.players[3]!.hand = [card("p4-card", "yellow", 3)];
+
+    playBatch(state, "p1", ["skip-r", "skip-y", "skip-g", "skip-b"]);
+    state.pendingBatchPlay!.resolvesAt = Date.now() - 1;
+    resolvePendingBatchPlay(state);
+
+    expect(snapshotFor(state).currentPlayerId).toBe("p3");
+  });
+
+  it("applies every Reverse in odd and even batches", () => {
+    const odd = controlledGame3();
+    odd.settings.batchEnabled = true;
+    odd.players[0]!.hand = [
+      card("odd-r", "red", "reverse"),
+      card("odd-y", "yellow", "reverse"),
+      card("odd-b", "blue", "reverse"),
+      card("odd-keep", "green", 1)
+    ];
+    playBatch(odd, "p1", ["odd-r", "odd-y", "odd-b"]);
+    odd.pendingBatchPlay!.resolvesAt = Date.now() - 1;
+    resolvePendingBatchPlay(odd);
+    expect(odd.direction).toBe(-1);
+    expect(snapshotFor(odd).currentPlayerId).toBe("p3");
+
+    const even = controlledGame3();
+    even.settings.batchEnabled = true;
+    even.players[0]!.hand = [card("even-r", "red", "reverse"), card("even-y", "yellow", "reverse"), card("even-keep", "green", 1)];
+    playBatch(even, "p1", ["even-r", "even-y"]);
+    even.pendingBatchPlay!.resolvesAt = Date.now() - 1;
+    resolvePendingBatchPlay(even);
+    expect(even.direction).toBe(1);
+    expect(snapshotFor(even).currentPlayerId).toBe("p2");
+  });
+
+  it("multiplies draw batches and extends an active stack", () => {
+    const state = controlledGame3();
+    state.settings.batchEnabled = true;
+    state.settings.stackingEnabled = true;
+    state.players[0]!.hand = [
+      card("p1-r2", "red", "draw2"),
+      card("p1-b2", "blue", "draw2"),
+      card("keep-a", "red", 1),
+      card("keep-a2", "green", 3)
+    ];
+    state.players[1]!.hand = [card("p2-y2", "yellow", "draw2"), card("p2-g2", "green", "draw2"), card("keep-b", "blue", 1)];
+
+    playBatch(state, "p1", ["p1-r2", "p1-b2"]);
+    state.pendingBatchPlay!.resolvesAt = Date.now() - 1;
+    resolvePendingBatchPlay(state);
+    expect(state.pendingStack).toMatchObject({ targetPlayerId: "p2", totalDraw: 4 });
+
+    playBatch(state, "p2", ["p2-y2", "p2-g2"]);
+    state.pendingBatchPlay!.resolvesAt = Date.now() - 1;
+    resolvePendingBatchPlay(state);
+    expect(state.pendingStack).toMatchObject({ targetPlayerId: "p3", totalDraw: 8, challengeable: false });
+  });
+
+  it("challenges a Wild Draw Four batch as one multiplied penalty", () => {
+    const state = controlledGame3();
+    state.settings.batchEnabled = true;
+    state.settings.challengeEnabled = true;
+    state.players[0]!.hand = [
+      card("wild4-a", null, "wild4"),
+      card("wild4-b", null, "wild4"),
+      card("red-9", "red", 9),
+      card("blue-1", "blue", 1)
+    ];
+
+    playBatch(state, "p1", ["wild4-a", "wild4-b"], "blue");
+    state.pendingBatchPlay!.resolvesAt = Date.now() - 1;
+    resolvePendingBatchPlay(state);
+
+    expect(state.pendingChallenge).toMatchObject({ offenderId: "p1", challengerId: "p2", guilty: true, drawCount: 8 });
+    const before = state.players[0]!.hand.length;
+    resolveChallenge(state, "p2", true);
+    expect(state.players[0]!.hand).toHaveLength(before + 8);
+    expect(snapshotFor(state).currentPlayerId).toBe("p2");
   });
 
   it("pauses auto turns when fewer than two active players are available and resumes when one returns", () => {

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { joinOptionsSchema, roomCodeSchema } from "@congcard/shared";
+import { joinOptionsSchema, playBatchSchema, roomCodeSchema } from "@congcard/shared";
 import {
   addPlayer,
   createGame,
@@ -42,6 +42,10 @@ describe("room lifecycle", () => {
     expect(state.settings.jumpInEnabled).toBe(true);
     expect(state.settings.stackingEnabled).toBe(true);
     expect(state.settings.challengeEnabled).toBe(true);
+    expect(state.settings.batchEnabled).toBe(false);
+
+    updateSettings(state, "host", { batchEnabled: true });
+    expect(state.settings.batchEnabled).toBe(true);
   });
 
   it("defaults One and Catch off for Last Stand and back on for normal scoring", () => {
@@ -62,6 +66,15 @@ describe("room lifecycle", () => {
     expect(roomCodeSchema.parse("abc234")).toBe("ABC234");
     expect(() => roomCodeSchema.parse("ABC12!")).toThrow();
     expect(() => joinOptionsSchema.parse({ nickname: "Player", avatarId: "../../evil" })).toThrow();
+  });
+
+  it("validates ordered unique batch card payloads", () => {
+    expect(playBatchSchema.parse({ cardIds: ["a", "b"], declaredColor: "green" })).toEqual({
+      cardIds: ["a", "b"],
+      declaredColor: "green"
+    });
+    expect(() => playBatchSchema.parse({ cardIds: ["a"] })).toThrow();
+    expect(() => playBatchSchema.parse({ cardIds: ["a", "a"] })).toThrow();
   });
 
   it("reclaims a disconnected player with a durable resume token", () => {
