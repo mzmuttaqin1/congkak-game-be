@@ -15,7 +15,8 @@ import type {
   PublicPlayer,
   PublicViewer,
   RoomSettings,
-  RoomSettingsInput
+  RoomSettingsInput,
+  RoundScoreBreakdown
 } from "@congcard/shared";
 import { COLORS, mergeRoomSettings } from "@congcard/shared";
 import { standardMode, shuffleCards, buildSingleDeck } from "./modes/standard.js";
@@ -75,6 +76,8 @@ export interface GameStateInternal {
   roundWinnerId?: string;
   gameWinnerId?: string;
   lastStandPlacements?: LastStandPlacement[];
+  /** Per-round scoring breakdown shown on the round-end overlay (points modes only). */
+  roundScore?: RoundScoreBreakdown;
   /** Timestamp when we first decided an auto-play was needed; cleared after the move fires. */
   autoPlayPendingAt?: number;
 }
@@ -407,6 +410,7 @@ export function startRound(state: GameStateInternal): void {
   delete state.roundWinnerId;
   delete state.gameWinnerId;
   delete state.lastStandPlacements;
+  delete state.roundScore;
   state.roundNumber += 1;
 
   for (const player of state.players) {
@@ -566,8 +570,10 @@ export function playBatch(
   ensurePlayerInRound(player);
   ensureNoActiveOneWindow(state);
 
-  if (player.drawnCardId) {
-    throw new GameError("batch_after_draw", "Batch Cards cannot be played after drawing.");
+  // After drawing, the player committed to the drawn card: a batch is allowed
+  // only when it includes that card (the FE forces it to be the starter).
+  if (player.drawnCardId && !cardIds.includes(player.drawnCardId)) {
+    throw new GameError("drawn_card_only", "You can only play the card you just drew.");
   }
 
   if (cardIds.length < 2 || new Set(cardIds).size !== cardIds.length) {
@@ -642,6 +648,7 @@ export function playBatch(
     handBefore: [...player.hand],
     activeColorBefore: state.activeColor ?? "red"
   };
+  delete player.drawnCardId;
   delete state.turnDeadline;
   delete state.autoPlayPendingAt;
 }
@@ -1078,6 +1085,10 @@ export function snapshotFor(state: GameStateInternal, playerId?: string): GameSn
 
   if (state.gameWinnerId) {
     snapshot.gameWinnerId = state.gameWinnerId;
+  }
+
+  if (state.roundScore) {
+    snapshot.roundScore = state.roundScore;
   }
 
   return snapshot;
@@ -1688,12 +1699,39 @@ function maybeCompleteLastStandRound(state: GameStateInternal): boolean {
   return true;
 }
 
+function scoreHandBreakdown(hand: Card[]): { numberPoints: number; actionPoints: number; wildPoints: number; handValue: number } {
+  let numberPoints = 0;
+  let actionPoints = 0;
+  let wildPoints = 0;
+
+  for (const card of hand) {
+    if (typeof card.value === "number") {
+      numberPoints += card.value;
+    } else if (card.value === "wild" || card.value === "wild4") {
+      wildPoints += 50;
+    } else {
+      actionPoints += 20;
+    }
+  }
+
+  return { numberPoints, actionPoints, wildPoints, handValue: numberPoints + actionPoints + wildPoints };
+}
+
 function completeRound(state: GameStateInternal, winnerId: string): void {
-  const mode = getMode(state.settings);
   const winner = findPlayer(state, winnerId);
-  const score = state.players
-    .filter((player) => player.id !== winnerId)
-    .reduce((total, player) => total + mode.scoreHand(player.hand), 0);
+  const losers = state.players.filter((player) => player.id !== winnerId);
+  const breakdownPlayers = losers.map((player) => {
+    const parts = scoreHandBreakdown(player.hand);
+    return {
+      playerId: player.id,
+      cardCount: player.hand.length,
+      handValue: parts.handValue,
+      numberPoints: parts.numberPoints,
+      actionPoints: parts.actionPoints,
+      wildPoints: parts.wildPoints
+    };
+  });
+  const score = breakdownPlayers.reduce((total, player) => total + player.handValue, 0);
 
   winner.score += score;
   state.phase = state.settings.scoreTarget === 500 && winner.score >= 500 ? "gameEnd" : "roundEnd";
@@ -1701,6 +1739,13 @@ function completeRound(state: GameStateInternal, winnerId: string): void {
   if (state.phase === "gameEnd") {
     state.gameWinnerId = winner.id;
   }
+
+  state.roundScore = {
+    winnerId: winner.id,
+    total: score,
+    isGameEnd: state.phase === "gameEnd",
+    players: breakdownPlayers
+  };
 
   delete state.turnDeadline;
   delete state.pendingChallenge;

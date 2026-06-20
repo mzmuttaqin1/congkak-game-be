@@ -521,6 +521,20 @@ describe("standard mode", () => {
     expect(state.phase).toBe("roundEnd");
     expect(state.players[0]!.score).toBe(70);
     expect(state.roundWinnerId).toBe("p1");
+
+    expect(state.roundScore).toBeDefined();
+    expect(state.roundScore!.winnerId).toBe("p1");
+    expect(state.roundScore!.total).toBe(70);
+    expect(state.roundScore!.isGameEnd).toBe(false);
+    expect(state.roundScore!.players).toHaveLength(1);
+    const loserScore = state.roundScore!.players[0]!;
+    expect(loserScore.playerId).toBe("p2");
+    expect(loserScore.cardCount).toBe(2);
+    expect(loserScore.handValue).toBe(70);
+    expect(loserScore.numberPoints).toBe(0);
+    expect(loserScore.actionPoints).toBe(20);
+    expect(loserScore.wildPoints).toBe(50);
+    expect(snapshotFor(state, "p1").roundScore).toEqual(state.roundScore);
   });
 
   it("keeps a Last Stand round active after the first finisher", () => {
@@ -909,18 +923,37 @@ describe("standard mode", () => {
     expect(state.oneWindow?.playerId).toBe("p1");
   });
 
-  it("rejects invalid and post-draw batches without mutating the hand", () => {
+  it("rejects invalid batches and post-draw batches that omit the drawn card", () => {
     const state = controlledGame3();
     state.settings.batchEnabled = true;
-    state.players[0]!.hand = [card("p1-red-5", "red", 5), card("p1-blue-6", "blue", 6), card("p1-green-5", "green", 5)];
+    state.players[0]!.hand = [
+      card("p1-red-5", "red", 5),
+      card("p1-green-5", "green", 5),
+      card("p1-yellow-5", "yellow", 5),
+      card("p1-blue-6", "blue", 6)
+    ];
     const before = state.players[0]!.hand.map((item) => item.id);
 
     expect(() => playBatch(state, "p1", ["p1-red-5", "p1-blue-6"])).toThrow("same value");
     expect(state.players[0]!.hand.map((item) => item.id)).toEqual(before);
 
+    // After drawing you commit to the drawn card: a batch that omits it is rejected.
     state.players[0]!.drawnCardId = "p1-red-5";
-    expect(() => playBatch(state, "p1", ["p1-red-5", "p1-green-5"])).toThrow("after drawing");
+    expect(() => playBatch(state, "p1", ["p1-green-5", "p1-yellow-5"])).toThrow("just drew");
     expect(state.pendingBatchPlay).toBeUndefined();
+    expect(state.players[0]!.hand.map((item) => item.id)).toEqual(before);
+  });
+
+  it("allows a post-draw batch that includes the drawn card", () => {
+    const state = controlledGame3();
+    state.settings.batchEnabled = true;
+    state.players[0]!.hand = [card("p1-red-5", "red", 5), card("p1-green-5", "green", 5), card("p1-green-9", "green", 9)];
+    state.players[0]!.drawnCardId = "p1-red-5";
+
+    playBatch(state, "p1", ["p1-red-5", "p1-green-5"]);
+
+    expect(state.pendingBatchPlay).toMatchObject({ playerId: "p1", cards: [{ id: "p1-red-5" }, { id: "p1-green-5" }] });
+    expect(state.players[0]!.drawnCardId).toBeUndefined();
   });
 
   it("applies wrapped batch skips without counting the actor", () => {
